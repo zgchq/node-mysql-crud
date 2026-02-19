@@ -1,0 +1,22 @@
+ <!DOCTYPE html>
+<meta charset="utf-8">
+<title>登录</title>
+<div class="container py-5">
+  <div class="card max-w-sm mx-auto p-4">
+    <h3>登录</h3>
+    <input class="form-control my-2" id="user" placeholder="账号">
+    <input class="form-control my-2" id="pwd" type="password" placeholder="密码">
+    <button class="btn btn-primary w-100" onclick="login()">登录</button>
+    <div class="mt-2"><a href="/register">去注册</a></div>
+  </div>
+</div>
+<script>
+async function login(){
+  const r=await fetch('/api/login',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({username:document.getElementById('user').value,password:document.getElementById('pwd').value})
+  })
+  const j=await r.json()
+  if(j.code===0) location.href='/'
+}
+</script>
