@@ -1,80 +1,231 @@
  <!DOCTYPE html>
-<meta charset="utf-8">
-<title>主页</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
-<div class="container py-4">
-  <div class="d-flex justify-content-between align-items-center mb-3">
-    <div>
-      <img id="avatar" width="50" height="50" class="rounded-circle">
-      <span id="username" class="ms-2"></span>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>用户首页</title>
+    <!-- 引入Bootstrap美化样式（可选，保证表格美观） -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+    <div class="container mt-5">
+        <!-- 顶部导航 -->
+        <div class="mb-4 d-flex justify-content-between align-items-center">
+            <h2>欢迎，<span id="username"></span></h2>
+            <button class="btn btn-danger" onclick="logout()">退出登录</button>
+        </div>
+
+        <!-- 新增数据区域（带图片上传） -->
+        <div class="card mb-4 p-4 max-w-md mx-auto">
+            <h4 class="mb-3">新增数据</h4>
+            <input class="form-control my-2" id="dataTitle" placeholder="标题">
+            <textarea class="form-control my-2" id="dataContent" rows="3" placeholder="内容"></textarea>
+            
+            <!-- 图片上传区域 -->
+            <div class="my-3">
+                <label class="form-label">上传图片：</label>
+                <input type="file" id="imageUpload" class="form-control" accept="image/*">
+                <!-- 图片预览区域 -->
+                <div id="imagePreview" class="mt-2" style="max-width: 300px; display: none;">
+                    <img id="previewImg" src="" alt="预览图" style="width: 100%; border-radius: 4px;">
+                </div>
+            </div>
+
+            <button class="btn btn-success w-100" onclick="addData()">提交数据</button>
+        </div>
+
+        <!-- 我的数据列表（核心：显示图片） -->
+        <div class="card mb-4 p-4 max-w-2xl mx-auto">
+            <h4 class="mb-3">我的数据</h4>
+            <table id="dataTable" class="table table-bordered table-striped">
+                <thead class="table-light">
+                    <tr>
+                        <th width="20%">标题</th>
+                        <th width="40%">内容</th>
+                        <th width="25%">图片</th>
+                        <th width="15%">操作</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
     </div>
-    <button class="btn btn-outline-danger" onclick="logout()">退出</button>
-  </div>
 
-  <div class="card mb-3 p-3">
-    <input type="file" id="avatarInput" class="form-control mb-2">
-    <button class="btn btn-sm btn-primary" onclick="uploadAvatar()">更换头像</button>
-  </div>
+    <script>
+        // 页面加载时获取用户信息
+        window.onload = async function() {
+            try {
+                const res = await fetch('/api/user/info', { credentials: 'include' });
+                const data = await res.json();
+                if (data.code !== 0) {
+                    alert('未登录或登录已过期，请重新登录');
+                    window.location.href = 'login.html';
+                    return;
+                }
+                document.getElementById('username').textContent = data.data.username;
+                loadUserData(); // 加载我的数据
+            } catch (error) {
+                alert('获取用户信息失败');
+                window.location.href = 'login.html';
+            }
+        };
 
-  <div class="card p-3 mb-3">
-    <input class="form-control mb-2" id="title" placeholder="标题">
-    <textarea class="form-control mb-2" id="content" rows="2" placeholder="内容"></textarea>
-    <button class="btn btn-primary" onclick="save()">保存</button>
-    <button class="btn btn-secondary ms-2" onclick="reset()">取消</button>
-  </div>
+        // 退出登录
+        async function logout() {
+            try {
+                const res = await fetch('/api/logout', {
+                    method: 'POST',
+                    credentials: 'include'
+                });
+                const data = await res.json();
+                if (data.code === 0) {
+                    alert('退出成功');
+                    window.location.href = 'login.html';
+                } else {
+                    alert('退出失败');
+                }
+            } catch (error) {
+                alert('退出失败');
+            }
+        }
 
-  <div class="d-flex gap-2 mb-3">
-    <input class="form-control" id="kw" placeholder="搜索">
-    <button class="btn btn-outline-primary" onclick="load()">搜索</button>
-    <button class="btn btn-success" onclick="exportExcel()">导出Excel</button>
-  </div>
+        // 图片预览
+        document.getElementById('imageUpload').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (file) {
+                if (!file.type.startsWith('image/')) {
+                    alert('请上传图片文件！');
+                    this.value = '';
+                    return;
+                }
+                const previewUrl = URL.createObjectURL(file);
+                document.getElementById('previewImg').src = previewUrl;
+                document.getElementById('imagePreview').style.display = 'block';
+            } else {
+                document.getElementById('imagePreview').style.display = 'none';
+                document.getElementById('previewImg').src = '';
+            }
+        });
 
-  <div id="list" class="mb-3"></div>
-  <div id="pages" class="d-flex gap-2 justify-content-center"></div>
-</div>
+        // 新增数据（带图片）
+        async function addData() {
+            const title = document.getElementById('dataTitle').value.trim();
+            const content = document.getElementById('dataContent').value.trim();
+            const imageFile = document.getElementById('imageUpload').files[0];
+            
+            if (!title || !content) {
+                alert('标题和内容不能为空！');
+                return;
+            }
 
-<script>
-let page = 1, size = 10, editId = null
-const user = await fetch('/api/user/info').then(r=>r.json()).then(j=>j.data)
-if(!user) location.href='/login'
-document.getElementById('username').innerText = user.username
-document.getElementById('avatar').src = user.avatar
+            if (imageFile) {
+                const formData = new FormData();
+                formData.append('title', title);
+                formData.append('content', content);
+                formData.append('image', imageFile);
 
-async function load(){
-  const r=await fetch(`/api/data/list?page=${page}&size=${size}&keyword=${document.getElementById('kw').value}`)
-  const j=await r.json()
-  const list = j.data.list
-  document.getElementById('list').innerHTML = list.map(i=>`
-    <div class="card p-3 mb-2">
-      <h5>${i.title}</h5>
-      <p>${i.content||''}</p>
-      <button class="btn btn-sm btn-warning me-1" onclick="edit(${i.id},'${i.title}','${i.content}')">编辑</button>
-      <button class="btn btn-sm btn-danger" onclick="del(${i.id})">删除</button>
-    </div>
-  `).join('')
-}
+                try {
+                    const response = await fetch('/api/data/add', {
+                        method: 'POST',
+                        credentials: 'include',
+                        body: formData
+                    });
 
-async function save(){
-  const title = document.getElementById('title').value
-  const content = document.getElementById('content').value
-  const url = editId ? '/api/data/update' : '/api/data/add'
-  await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(editId?{id:editId,title,content}:{title,content})})
-  reset()
-  load()
-}
+                    const data = await response.json();
+                    if (data.code === 0) {
+                        alert('新增成功！');
+                        document.getElementById('dataTitle').value = '';
+                        document.getElementById('dataContent').value = '';
+                        document.getElementById('imageUpload').value = '';
+                        document.getElementById('imagePreview').style.display = 'none';
+                        loadUserData();
+                    } else {
+                        alert('新增失败：' + data.msg);
+                    }
+                } catch (error) {
+                    console.error('新增数据失败：', error);
+                    alert('网络错误，请重试');
+                }
+            } else {
+                try {
+                    const response = await fetch('/api/data/add', {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ title, content })
+                    });
 
-function edit(id,t,c){ editId=id; document.getElementById('title').value=t; document.getElementById('content').value=c }
-function reset(){ editId=null; document.getElementById('title').value=''; document.getElementById('content').value='' }
-async function del(id){ await fetch('/api/data/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})}); load() }
-function logout(){ fetch('/api/logout').then(()=>location.href='/login') }
-async function uploadAvatar(){
-  const f = new FormData()
-  f.append('avatar',document.getElementById('avatarInput').files[0])
-  const r=await fetch('/api/user/avatar',{method:'POST',body:f})
-  const j=await r.json()
-  document.getElementById('avatar').src = j.data
-}
-function exportExcel(){ window.open('/api/data/export') }
-load()
-</script>
+                    const data = await response.json();
+                    if (data.code === 0) {
+                        alert('新增成功！');
+                        document.getElementById('dataTitle').value = '';
+                        document.getElementById('dataContent').value = '';
+                        loadUserData();
+                    } else {
+                        alert('新增失败：' + data.msg);
+                    }
+                } catch (error) {
+                    console.error('新增数据失败：', error);
+                    alert('网络错误，请重试');
+                }
+            }
+        }
+
+        // 加载我的数据（核心：图片显示）
+        async function loadUserData() {
+            try {
+                const res = await fetch('/api/data/list', { 
+                    method: 'GET',
+                    credentials: 'include'
+                });
+                const result = await res.json();
+
+                const tbody = document.querySelector('#dataTable tbody');
+                if (result.code === 0 && result.data.length > 0) {
+                    tbody.innerHTML = '';
+                    result.data.forEach(item => {
+                        // 关键：将路径转为图片标签
+                        const imgHtml = item.image_url 
+                            ? `<img src="${item.image_url}" style="width: 100px; height: auto; border-radius: 4px;" alt="数据图片">` 
+                            : '<span class="text-muted">无图片</span>';
+
+                        const tr = document.createElement('tr');
+                        tr.innerHTML = `
+                            <td>${item.title}</td>
+                            <td>${item.content}</td>
+                            <td>${imgHtml}</td>
+                            <td><button class="btn btn-danger btn-sm" onclick="deleteData(${item.id})">删除</button></td>
+                        `;
+                        tbody.appendChild(tr);
+                    });
+                } else {
+                    tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">暂无数据，请先添加</td></tr>';
+                }
+            } catch (error) {
+                console.error('加载数据失败：', error);
+                alert('加载数据失败，请刷新重试');
+            }
+        }
+
+        // 删除数据
+        async function deleteData(id) {
+            if (!confirm('确定要删除这条数据吗？')) return;
+            try {
+                const res = await fetch(`/api/data/delete/${id}`, {
+                    method: 'DELETE',
+                    credentials: 'include'
+                });
+                const result = await res.json();
+                if (result.code === 0) {
+                    alert('删除成功');
+                    loadUserData();
+                } else {
+                    alert('删除失败：' + result.msg);
+                }
+            } catch (error) {
+                console.error('删除数据失败：', error);
+                alert('删除失败，请刷新重试');
+            }
+        }
+    </script>
+</body>
+</html>

@@ -1,36 +1,183 @@
-<!DOCTYPE html>
-<meta charset="utf-8">
-<title>管理后台</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
-<div class="container py-4">
-  <h3>管理后台</h3>
-  <ul class="nav nav-tabs mb-3">
-    <li class="nav-item"><button class="nav-link active" onclick="show('users')">用户管理</button></li>
-    <li class="nav-item"><button class="nav-link" onclick="show('data')">所有数据</button></li>
-  </ul>
-  <div id="panel"></div>
-</div>
-<script>
-let mode='users'
-async function load(){
-  if(mode==='users'){
-    const r=await fetch('/api/admin/users')
-    const j=await r.json()
-    document.getElementById('panel').innerHTML=j.data.map(u=>`
-      <div class="card p-3 mb-2">
-        ${u.username} (${u.email}) 管理员：${u.is_admin?'是':'否'}
-      </div>
-    `).join('')
-  }else{
-    const r=await fetch('/api/admin/data')
-    const j=await r.json()
-    document.getElementById('panel').innerHTML=j.data.map(d=>`
-      <div class="card p-3 mb-2">
-        <strong>${d.username}</strong>：${d.title}
-      </div>
-    `).join('')
-  }
-}
-function show(m){ mode=m; load() }
-load()
-</script>
+ <!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>管理员后台</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+    <div class="container mt-5">
+        <div class="mb-4 d-flex justify-content-between align-items-center">
+            <h2>管理员后台</h2>
+            <button class="btn btn-danger" onclick="logout()">退出登录</button>
+        </div>
+
+        <!-- 用户管理区域 -->
+        <div class="card mb-4 p-4 max-w-2xl mx-auto">
+            <h4 class="mb-3">用户管理</h4>
+            <div id="userList" class="list-group"></div>
+        </div>
+
+        <!-- 所有数据管理区域（核心：显示图片） -->
+        <div class="card mb-4 p-4 max-w-3xl mx-auto">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h4>所有数据管理</h4>
+                <button class="btn btn-success" onclick="exportExcel()">导出Excel</button>
+            </div>
+            <table id="allDataTable" class="table table-bordered table-striped">
+                <thead class="table-light">
+                    <tr>
+                        <th width="18%">标题</th>
+                        <th width="35%">内容</th>
+                        <th width="22%">图片</th>
+                        <th width="15%">所属用户</th>
+                        <th width="10%">创建时间</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        // 页面加载验证管理员权限
+        window.onload = async function() {
+            try {
+                const res = await fetch('/api/user/info', { credentials: 'include' });
+                const data = await res.json();
+                if (data.code !== 0 || data.data.is_admin !== 1) {
+                    alert('无管理员权限，请登录管理员账号');
+                    window.location.href = 'login.html';
+                    return;
+                }
+                loadUserList(); // 加载用户列表
+                loadAllData();  // 加载所有数据
+            } catch (error) {
+                alert('验证权限失败');
+                window.location.href = 'login.html';
+            }
+        };
+
+        // 退出登录
+        async function logout() {
+            try {
+                const res = await fetch('/api/logout', {
+                    method: 'POST',
+                    credentials: 'include'
+                });
+                const data = await res.json();
+                if (data.code === 0) {
+                    alert('退出成功');
+                    window.location.href = 'login.html';
+                } else {
+                    alert('退出失败');
+                }
+            } catch (error) {
+                alert('退出失败');
+            }
+        }
+
+        // 加载用户列表
+        async function loadUserList() {
+            try {
+                const res = await fetch('/api/admin/users', { credentials: 'include' });
+                const data = await res.json();
+                const userList = document.getElementById('userList');
+                
+                if (data.code === 0 && data.data.length > 0) {
+                    userList.innerHTML = '';
+                    data.data.forEach(user => {
+                        const role = user.is_admin === 1 ? '管理员' : '普通用户';
+                        const btnText = user.is_admin === 1 ? '取消管理员' : '设为管理员';
+                        const userDiv = document.createElement('div');
+                        userDiv.className = 'list-group-item d-flex justify-content-between align-items-center';
+                        userDiv.innerHTML = `
+                            <div>
+                                ${user.username} ${role} 
+                                <small class="text-muted">邮箱：${user.email || '未填写'}</small>
+                            </div>
+                            <button class="btn btn-primary btn-sm" onclick="setAdmin(${user.id}, ${1 - user.is_admin})">${btnText}</button>
+                        `;
+                        userList.appendChild(userDiv);
+                    });
+                } else {
+                    userList.innerHTML = '<div class="list-group-item text-muted">暂无用户</div>';
+                }
+            } catch (error) {
+                console.error('加载用户列表失败：', error);
+                alert('加载用户列表失败');
+            }
+        }
+
+        // 修改用户权限
+        async function setAdmin(userId, isAdmin) {
+            try {
+                const res = await fetch(`/api/admin/set-admin/${userId}`, {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ is_admin: isAdmin })
+                });
+                const data = await res.json();
+                if (data.code === 0) {
+                    alert(isAdmin === 1 ? '设为管理员成功' : '取消管理员成功');
+                    loadUserList();
+                } else {
+                    alert('修改权限失败：' + data.msg);
+                }
+            } catch (error) {
+                console.error('修改权限失败：', error);
+                alert('修改权限失败');
+            }
+        }
+
+        // 加载所有数据（核心：图片显示）
+        async function loadAllData() {
+            try {
+                const res = await fetch('/api/admin/all-data', {
+                    method: 'GET',
+                    credentials: 'include'
+                });
+                const result = await res.json();
+
+                const tbody = document.querySelector('#allDataTable tbody');
+                if (result.code === 0 && result.data.length > 0) {
+                    tbody.innerHTML = '';
+                    result.data.forEach(item => {
+                        // 关键：将路径转为图片标签
+                        const imgHtml = item.image_url 
+                            ? `<img src="${item.image_url}" style="width: 100px; height: auto; border-radius: 4px;" alt="数据图片">` 
+                            : '<span class="text-muted">无图片</span>';
+
+                        const createTime = item.createdAt ? new Date(item.createdAt).toLocaleString() : '未知时间';
+
+                        const tr = document.createElement('tr');
+                        tr.innerHTML = `
+                            <td>${item.title}</td>
+                            <td>${item.content}</td>
+                            <td>${imgHtml}</td>
+                            <td>${item.username || '未知用户'}</td>
+                            <td>${createTime}</td>
+                        `;
+                        tbody.appendChild(tr);
+                    });
+                } else {
+                    tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3">暂无数据</td></tr>';
+                }
+            } catch (error) {
+                console.error('加载所有数据失败：', error);
+                document.querySelector('#allDataTable tbody').innerHTML = '<tr><td colspan="5" class="text-center text-danger py-3">加载数据失败</td></tr>';
+            }
+        }
+
+        // 导出Excel
+        async function exportExcel() {
+            try {
+                window.open('/api/admin/export-excel', '_blank');
+            } catch (error) {
+                alert('导出Excel失败，请重试');
+            }
+        }
+    </script>
+</body>
+</html>
