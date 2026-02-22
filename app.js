@@ -1,48 +1,72 @@
 // ======================
-// 1. 依赖导入（统一、去重）
+// 1. 核心依赖导入（全量且去重）
 // ======================
-require('dotenv').config(); // 优先加载环境变量
+require('dotenv').config();
 const express = require('express');
-const mysql = require('mysql2'); // 统一用 mysql2，兼容 callback/promise
+const mysql = require('mysql2');
 const session = require('express-session');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const url = require('url'); // 解析 Railway MySQL URL 必备
 
 // ======================
-// 2. 全局配置（统一管理）
+// 2. 全局配置（适配 Railway）
 // ======================
 const app = express();
-// 端口：优先读环境变量（Render），本地默认3000
+// 端口：优先读取 Railway 自动分配的 PORT 环境变量
 const PORT = process.env.PORT || 3000;
-// 项目根目录（解决不同系统路径问题）
+// 项目根目录（Railway 中为 /app）
 const ROOT_DIR = __dirname;
-// 图片上传目录（动态拼接，兼容所有系统）
+// 图片上传目录（Railway 卷挂载路径）
 const UPLOAD_DIR = path.join(ROOT_DIR, 'uploads');
 
 // ======================
-// 3. 数据库连接配置（统一用环境变量）
+// 3. 数据库连接配置（核心：适配 Railway MySQL URL）
 // ======================
-const dbConfig = {
-  host: process.env.DB_HOST || 'localhost',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '123456',
-  database: process.env.DB_NAME || 'test_db',
-  port: process.env.DB_PORT || 3306,
-  charset: 'utf8mb4',
-  authPlugin: 'mysql_native_password',
-  // 连接池配置（优化性能，避免频繁创建连接）
-  waitForConnections: true,
-  connectionLimit: 5,
-  queueLimit: 0
-};
+let dbConfig = {};
 
-// 创建数据库连接（单例，全局复用）
+// 优先使用 Railway 的 MYSQL_URL（跨服务变量引用）
+if (process.env.DATABASE_URL) {
+  try {
+    const dbUrl = new url.URL(process.env.DATABASE_URL);
+    dbConfig = {
+      host: dbUrl.hostname,
+      user: dbUrl.username,
+      password: dbUrl.password,
+      database: dbUrl.pathname.slice(1), // 去掉路径开头的 "/"
+      port: dbUrl.port || 3306,
+      charset: 'utf8mb4',
+      authPlugin: 'mysql_native_password',
+      // 连接池优化（适配 Railway 连接限制）
+      waitForConnections: true,
+      connectionLimit: 5,
+      queueLimit: 0
+    };
+    console.log('✅ 已解析 Railway MySQL URL，数据库名：', dbConfig.database);
+  } catch (err) {
+    console.error('❌ 解析 MySQL URL 失败：', err.message);
+    process.exit(1);
+  }
+} else {
+  // 本地开发环境（备用）
+  dbConfig = {
+    host: process.env.DB_HOST || 'localhost',
+    user: process.env.DB_USER || 'root',
+    password: process.env.DB_PASSWORD || '123456',
+    database: process.env.DB_NAME || 'test_db',
+    port: process.env.DB_PORT || 3306,
+    charset: 'utf8mb4',
+    authPlugin: 'mysql_native_password'
+  };
+}
+
+// 创建数据库连接（全局复用）
 const connection = mysql.createConnection(dbConfig);
 
 // ======================
-// 4. 中间件配置（顺序合理，适配生产/本地）
+// 4. 中间件配置（顺序合理，适配 Railway 生产环境）
 // ======================
 // 解析 JSON 请求体
 app.use(express.json());
@@ -50,38 +74,38 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 // 托管静态文件（public 目录）
 app.use(express.static('public'));
-// 托管上传的图片（动态路径，兼容所有系统）
+// 托管上传的图片（Railway 卷挂载路径）
 app.use('/uploads', express.static(UPLOAD_DIR));
 
-// Session 配置（适配本地/生产环境）
+// Session 配置（适配 Railway HTTPS 生产环境）
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'your-secret-key-123', // 环境变量配置密钥
-  resave: false, // 优化：非必要不重新保存 session
-  saveUninitialized: false, // 优化：未初始化的 session 不保存
+  secret: process.env.SESSION_SECRET || 'railway-secret-123456789',
+  resave: false,
+  saveUninitialized: false,
   cookie: {
-    secure: process.env.NODE_ENV === 'production', // 生产环境（Render）启用 HTTPS
-    httpOnly: true, // 防止前端 JS 访问 cookie
-    sameSite: 'lax', // 允许跨域请求携带 cookie
-    maxAge: 24 * 60 * 60 * 1000 // 有效期 1 天
+    secure: process.env.NODE_ENV === 'production', // Railway 自动启用 HTTPS
+    httpOnly: true,
+    sameSite: 'lax',
+    maxAge: 24 * 60 * 60 * 1000 // 1 天有效期
   }
 }));
 
 // ======================
-// 5. 图片上传配置（动态路径，兼容所有系统）
+// 5. 图片上传配置（Railway 卷挂载持久化）
 // ======================
 // 确保 uploads 文件夹存在（递归创建）
 if (!fs.existsSync(UPLOAD_DIR)) {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+  console.log('✅ 创建 uploads 文件夹成功：', UPLOAD_DIR);
 }
 
-// multer 存储配置
+// multer 存储配置（本地持久化，Railway 卷挂载）
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, UPLOAD_DIR);
   },
   filename: (req, file, cb) => {
     const ext = path.extname(file.originalname);
-    // 文件名：时间戳 + 随机字符串，避免重复
     const fileName = Date.now() + '-' + Math.random().toString(36).substr(2, 8) + ext;
     cb(null, fileName);
   }
@@ -97,7 +121,7 @@ const fileFilter = (req, file, cb) => {
   }
 };
 
-// 初始化 multer（限制文件大小 5MB）
+// 初始化 multer（限制 5MB）
 const upload = multer({
   storage: storage,
   fileFilter: fileFilter,
@@ -109,20 +133,14 @@ const upload = multer({
 // ======================
 /**
  * 管理员权限校验中间件
- * @param {Request} req 
- * @param {Response} res 
- * @param {NextFunction} next 
  */
 function checkAdmin(req, res, next) {
-  // 1. 检查 Session 是否初始化
   if (!req.session) {
-    return res.json({ code: -1, msg: 'Session 初始化失败，请重启服务' });
+    return res.json({ code: -1, msg: 'Session 初始化失败' });
   }
-  // 2. 检查是否登录
   if (!req.session.user) {
     return res.json({ code: -1, msg: '请先登录' });
   }
-  // 3. 检查是否为管理员
   if (req.session.user.is_admin !== 1) {
     return res.json({ code: -1, msg: '无管理员权限' });
   }
@@ -130,37 +148,37 @@ function checkAdmin(req, res, next) {
 }
 
 /**
- * CSV 转义函数（解决中文/特殊字符乱码）
- * @param {string} str 
- * @returns {string}
+ * CSV 转义函数（解决导出乱码）
  */
 const escapeCsv = (str) => {
   if (typeof str !== 'string') str = String(str);
-  str = str.replace(/"/g, '""'); // 转义双引号
+  str = str.replace(/"/g, '""');
   if (str.includes(',') || str.includes('\n') || str.includes('"')) {
-    str = `"${str}"`; // 包含特殊字符则包裹双引号
+    str = `"${str}"`;
   }
   return str;
 };
 
 // ======================
-// 7. 业务接口（按功能分类，结构清晰）
+// 7. 健康检查接口（Railway 保活用）
 // ======================
-// ----------------------
-// 健康检查接口（Render 保活用）
-// ----------------------
 app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok', time: new Date(), port: PORT });
+  res.status(200).json({
+    status: 'ok',
+    time: new Date(),
+    port: PORT,
+    database: dbConfig.database,
+    upload_dir: UPLOAD_DIR
+  });
 });
 
-// ----------------------
-// 用户模块接口
-// ----------------------
+// ======================
+// 8. 用户模块接口
+// ======================
 // 注册
 app.post('/api/register', (req, res) => {
   const { username, password, email } = req.body;
 
-  // 参数校验
   if (!username || !password) {
     return res.json({ code: -1, msg: '用户名和密码不能为空' });
   }
@@ -168,11 +186,9 @@ app.post('/api/register', (req, res) => {
     return res.json({ code: -1, msg: '密码长度不能少于6位' });
   }
 
-  // 密码加密
   const salt = bcrypt.genSaltSync(10);
   const hashPassword = bcrypt.hashSync(password, salt);
 
-  // 插入数据库
   const sql = 'INSERT INTO users (username, password, email, is_admin) VALUES (?, ?, ?, 0)';
   connection.query(sql, [username, hashPassword, email || ''], (err, results) => {
     if (err) {
@@ -189,12 +205,10 @@ app.post('/api/register', (req, res) => {
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body;
 
-  // 参数校验
   if (!username || !password) {
     return res.json({ code: -1, msg: '用户名和密码不能为空' });
   }
 
-  // 查询用户
   const sql = 'SELECT id, username, password, is_admin FROM users WHERE username = ?';
   connection.query(sql, [username], (err, results) => {
     if (err) {
@@ -204,7 +218,6 @@ app.post('/api/login', (req, res) => {
       return res.json({ code: -1, msg: '用户名或密码错误' });
     }
 
-    // 验证密码
     const user = results[0];
     const isPasswordValid = bcrypt.compareSync(password, user.password);
     if (!isPasswordValid) {
@@ -222,7 +235,7 @@ app.post('/api/login', (req, res) => {
   });
 });
 
-// 获取当前用户信息
+// 获取用户信息
 app.get('/api/user/info', (req, res) => {
   if (!req.session || !req.session.user) {
     return res.json({ code: -1, msg: '未登录' });
@@ -246,17 +259,15 @@ app.post('/api/logout', (req, res) => {
   });
 });
 
-// ----------------------
-// 数据项模块接口
-// ----------------------
-// 新增数据（带图片上传）
+// ======================
+// 9. 数据项模块接口（带图片上传）
+// ======================
+// 新增数据
 app.post('/api/data/add', upload.single('image'), (req, res) => {
-  // 登录校验
   if (!req.session || !req.session.user) {
     return res.json({ code: -1, msg: '请先登录' });
   }
 
-  // 参数获取&校验
   const title = req.body.title?.trim() || '';
   const content = req.body.content?.trim() || '';
   const imageUrl = req.file ? `/uploads/${req.file.filename}` : '';
@@ -265,7 +276,6 @@ app.post('/api/data/add', upload.single('image'), (req, res) => {
     return res.json({ code: -1, msg: '标题和内容不能为空' });
   }
 
-  // 插入数据库
   const sql = 'INSERT INTO data_items (title, content, user_id, image_url, createdAt) VALUES (?, ?, ?, ?, NOW())';
   connection.query(sql, [title, content, req.session.user.id, imageUrl], (err, results) => {
     if (err) {
@@ -296,14 +306,13 @@ app.get('/api/data/list', (req, res) => {
   });
 });
 
-// 删除个人数据（含图片文件）
+// 删除个人数据（含图片）
 app.delete('/api/data/delete/:id', (req, res) => {
   if (!req.session || !req.session.user) {
     return res.json({ code: -1, msg: '请先登录' });
   }
 
   const { id } = req.params;
-  // 先查询数据，验证权限
   const checkSql = `SELECT id, image_url, user_id FROM data_items WHERE id = ?`;
   
   connection.query(checkSql, [id], (err, results) => {
@@ -323,11 +332,12 @@ app.delete('/api/data/delete/:id', (req, res) => {
         return res.json({ code: -1, msg: '删除失败：' + err.message });
       }
 
-      // 删除图片文件（如果有）
+      // 删除图片文件
       if (data.image_url) {
         const imagePath = path.join(ROOT_DIR, data.image_url);
         if (fs.existsSync(imagePath)) {
           fs.unlinkSync(imagePath);
+          console.log('✅ 删除图片成功：', imagePath);
         }
       }
 
@@ -336,9 +346,9 @@ app.delete('/api/data/delete/:id', (req, res) => {
   });
 });
 
-// ----------------------
-// 管理员模块接口
-// ----------------------
+// ======================
+// 10. 管理员模块接口
+// ======================
 // 获取所有用户
 app.get('/api/admin/users', checkAdmin, (req, res) => {
   const sql = 'SELECT id, username, email, is_admin FROM users ORDER BY id DESC';
@@ -350,12 +360,11 @@ app.get('/api/admin/users', checkAdmin, (req, res) => {
   });
 });
 
-// 修改用户管理员权限
+// 修改用户权限
 app.post('/api/admin/set-admin/:userId', checkAdmin, (req, res) => {
   const { userId } = req.params;
   const { is_admin } = req.body;
 
-  // 参数校验
   if (is_admin !== 0 && is_admin !== 1) {
     return res.json({ code: -1, msg: '权限值必须是 0（普通用户）或 1（管理员）' });
   }
@@ -369,7 +378,7 @@ app.post('/api/admin/set-admin/:userId', checkAdmin, (req, res) => {
   });
 });
 
-// 获取所有数据（关联用户信息）
+// 获取所有数据
 app.get('/api/admin/all-data', checkAdmin, (req, res) => {
   const sql = `
     SELECT d.id, d.title, d.content, d.image_url, d.createdAt, u.username 
@@ -385,7 +394,7 @@ app.get('/api/admin/all-data', checkAdmin, (req, res) => {
   });
 });
 
-// 导出所有数据为 CSV（Excel 兼容）
+// 导出 CSV
 app.get('/api/admin/export-excel', checkAdmin, (req, res) => {
   const sql = `
     SELECT d.title, d.content, d.image_url, d.createdAt, u.username 
@@ -404,13 +413,10 @@ app.get('/api/admin/export-excel', checkAdmin, (req, res) => {
     }
 
     try {
-      // 文件名（编码解决中文乱码）
       const fileName = encodeURIComponent(`所有数据_${new Date().toLocaleDateString()}.csv`);
-      // 响应头配置
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
 
-      // 构建 CSV 内容
       const header = `${escapeCsv('标题')},${escapeCsv('内容')},${escapeCsv('图片路径')},${escapeCsv('创建时间')},${escapeCsv('所属用户')}\n`;
       const rows = results.map(item => {
         const title = item.title || '';
@@ -426,25 +432,25 @@ app.get('/api/admin/export-excel', checkAdmin, (req, res) => {
       res.send(bom + header + rows);
 
     } catch (error) {
-      console.error('导出CSV格式处理失败：', error);
+      console.error('导出CSV失败：', error);
       res.json({ code: -1, msg: '导出失败：数据格式处理出错' });
     }
   });
 });
 
 // ======================
-// 8. 数据库连接 & 服务启动
+// 11. 数据库连接 & 服务启动（核心适配 Railway）
 // ======================
-// 连接数据库并配置编码
+// 连接数据库
 connection.connect((err) => {
   if (err) {
     console.error('❌ 数据库连接失败：', err);
-    // 连接失败时退出进程，Render 会自动重启
+    // Railway 中连接失败自动退出，触发重启
     process.exit(1);
   }
   console.log('✅ 数据库连接成功！');
 
-  // 配置数据库编码为 utf8mb4（解决中文乱码）
+  // 配置 utf8mb4 编码
   connection.query('SET NAMES utf8mb4', (err) => {
     if (err) {
       console.log('⚠️  数据库编码配置失败：', err);
@@ -454,26 +460,27 @@ connection.connect((err) => {
   });
 });
 
-// 启动服务（监听 0.0.0.0，适配 Render 部署）
+// 启动服务（监听 0.0.0.0，Railway 必须）
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ 后端服务启动成功！访问地址：http://0.0.0.0:${PORT}`);
+  console.log(`✅ 服务启动成功！端口：${PORT}，访问地址：https://localhost:${PORT}`);
+  console.log(`✅ 上传目录：${UPLOAD_DIR}`);
 });
 
 // ======================
-// 9. 优雅退出（关闭数据库连接）
+// 12. 优雅退出 & 异常捕获（Railway 适配）
 // ======================
 process.on('SIGINT', () => {
   connection.end((err) => {
-    if (err) console.error('❌ 数据库连接关闭失败：', err);
+    if (err) console.error('❌ 数据库关闭失败：', err);
     else console.log('✅ 数据库连接已关闭');
   });
-  console.log('\n❌ 后端服务已停止');
+  console.log('\n❌ 服务已停止');
   process.exit();
 });
 
-// 捕获未处理的异常，避免服务崩溃
+// 捕获未处理异常，避免服务崩溃
 process.on('uncaughtException', (err) => {
-  console.error('❌ 未捕获的异常：', err);
+  console.error('❌ 未捕获异常：', err);
   connection.end();
   process.exit(1);
-}); 
+});
