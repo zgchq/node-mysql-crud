@@ -1,62 +1,93 @@
- // 导入所有依赖
+// ======================
+// 1. 依赖导入（统一、去重）
+// ======================
+require('dotenv').config(); // 优先加载环境变量
 const express = require('express');
-const mysql = require('mysql');
+const mysql = require('mysql2'); // 统一用 mysql2，兼容 callback/promise
 const session = require('express-session');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 
-// 初始化 Express 应用
+// ======================
+// 2. 全局配置（统一管理）
+// ======================
 const app = express();
-const port = 3000;
+// 端口：优先读环境变量（Render），本地默认3000
+const PORT = process.env.PORT || 3000;
+// 项目根目录（解决不同系统路径问题）
+const ROOT_DIR = __dirname;
+// 图片上传目录（动态拼接，兼容所有系统）
+const UPLOAD_DIR = path.join(ROOT_DIR, 'uploads');
 
 // ======================
-// 核心修复：正确配置中间件（顺序不能乱！）
+// 3. 数据库连接配置（统一用环境变量）
 // ======================
-// 1. 解析 JSON 请求体
+const dbConfig = {
+  host: process.env.DB_HOST || 'localhost',
+  user: process.env.DB_USER || 'root',
+  password: process.env.DB_PASSWORD || '123456',
+  database: process.env.DB_NAME || 'test_db',
+  port: process.env.DB_PORT || 3306,
+  charset: 'utf8mb4',
+  authPlugin: 'mysql_native_password',
+  // 连接池配置（优化性能，避免频繁创建连接）
+  waitForConnections: true,
+  connectionLimit: 5,
+  queueLimit: 0
+};
+
+// 创建数据库连接（单例，全局复用）
+const connection = mysql.createConnection(dbConfig);
+
+// ======================
+// 4. 中间件配置（顺序合理，适配生产/本地）
+// ======================
+// 解析 JSON 请求体
 app.use(express.json());
-// 2. 解析 FormData 表单（必须加，否则图片上传时 req.body 为空）
+// 解析 FormData 表单（支持文件上传）
 app.use(express.urlencoded({ extended: true }));
-// 3. 托管静态文件（public + uploads）
+// 托管静态文件（public 目录）
 app.use(express.static('public'));
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+// 托管上传的图片（动态路径，兼容所有系统）
+app.use('/uploads', express.static(UPLOAD_DIR));
 
-// 4. 修复 Session 配置（解决 req.session 为 undefined 的核心问题）
+// Session 配置（适配本地/生产环境）
 app.use(session({
-  secret: 'your-secret-key-123',
-  resave: true,          // 修复：设为 true 避免 session 丢失
-  saveUninitialized: true,
+  secret: process.env.SESSION_SECRET || 'your-secret-key-123', // 环境变量配置密钥
+  resave: false, // 优化：非必要不重新保存 session
+  saveUninitialized: false, // 优化：未初始化的 session 不保存
   cookie: {
-    secure: false,       // 本地开发用 false
-    httpOnly: true,      // 安全：防止前端 JS 访问 cookie
-    sameSite: 'lax',     // 修复：允许跨域请求携带 cookie
-    maxAge: 24 * 60 * 60 * 1000 // session 有效期 1 天
+    secure: process.env.NODE_ENV === 'production', // 生产环境（Render）启用 HTTPS
+    httpOnly: true, // 防止前端 JS 访问 cookie
+    sameSite: 'lax', // 允许跨域请求携带 cookie
+    maxAge: 24 * 60 * 60 * 1000 // 有效期 1 天
   }
 }));
 
 // ======================
-// 配置图片上传（multer）
+// 5. 图片上传配置（动态路径，兼容所有系统）
 // ======================
-// 确保 uploads 文件夹存在
-const uploadDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true }); // 递归创建，避免权限问题
+// 确保 uploads 文件夹存在（递归创建）
+if (!fs.existsSync(UPLOAD_DIR)) {
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 }
 
 // multer 存储配置
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, uploadDir);
+    cb(null, UPLOAD_DIR);
   },
   filename: (req, file, cb) => {
     const ext = path.extname(file.originalname);
+    // 文件名：时间戳 + 随机字符串，避免重复
     const fileName = Date.now() + '-' + Math.random().toString(36).substr(2, 8) + ext;
     cb(null, fileName);
   }
 });
 
-// 图片过滤
+// 图片格式过滤
 const fileFilter = (req, file, cb) => {
   const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
   if (allowedTypes.includes(file.mimetype)) {
@@ -66,67 +97,70 @@ const fileFilter = (req, file, cb) => {
   }
 };
 
+// 初始化 multer（限制文件大小 5MB）
 const upload = multer({
   storage: storage,
   fileFilter: fileFilter,
-  limits: { fileSize: 5 * 1024 * 1024 } // 5MB 限制
+  limits: { fileSize: 5 * 1024 * 1024 }
 });
 
 // ======================
-// 数据库连接
+// 6. 核心工具函数/中间件
 // ======================
-const connection = mysql.createConnection({
-  host: 'localhost',
-  user: 'root',
-  password: '123456',
-  database: 'login_system',
-  port: 3306,
-  authPlugin: 'mysql_native_password' // 兼容 MySQL 8.0 认证
-});
-
-// 连接数据库
-connection.connect((err) => {
-  if (err) {
-    console.error('数据库连接失败：', err);
-    return;
-  }
-  console.log('✅ 数据库连接成功！');
-
-  // 配置编码
-  connection.query('SET NAMES utf8mb4', (err) => {
-    if (err) {
-      console.log('编码配置失败：', err);
-    } else {
-      console.log('✅ 数据库编码配置为 utf8mb4 成功！');
-    }
-  });
-});
-
-// ======================
-// 管理员权限中间件（修复：先判断 req.session 是否存在）
-// ======================
+/**
+ * 管理员权限校验中间件
+ * @param {Request} req 
+ * @param {Response} res 
+ * @param {NextFunction} next 
+ */
 function checkAdmin(req, res, next) {
-  // 第一步：判断 req.session 是否存在
+  // 1. 检查 Session 是否初始化
   if (!req.session) {
     return res.json({ code: -1, msg: 'Session 初始化失败，请重启服务' });
   }
-  // 第二步：判断是否登录
+  // 2. 检查是否登录
   if (!req.session.user) {
     return res.json({ code: -1, msg: '请先登录' });
   }
-  // 第三步：判断是否为管理员
+  // 3. 检查是否为管理员
   if (req.session.user.is_admin !== 1) {
     return res.json({ code: -1, msg: '无管理员权限' });
   }
   next();
 }
 
+/**
+ * CSV 转义函数（解决中文/特殊字符乱码）
+ * @param {string} str 
+ * @returns {string}
+ */
+const escapeCsv = (str) => {
+  if (typeof str !== 'string') str = String(str);
+  str = str.replace(/"/g, '""'); // 转义双引号
+  if (str.includes(',') || str.includes('\n') || str.includes('"')) {
+    str = `"${str}"`; // 包含特殊字符则包裹双引号
+  }
+  return str;
+};
+
 // ======================
-// 接口：用户注册
+// 7. 业务接口（按功能分类，结构清晰）
 // ======================
+// ----------------------
+// 健康检查接口（Render 保活用）
+// ----------------------
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', time: new Date(), port: PORT });
+});
+
+// ----------------------
+// 用户模块接口
+// ----------------------
+// 注册
 app.post('/api/register', (req, res) => {
   const { username, password, email } = req.body;
 
+  // 参数校验
   if (!username || !password) {
     return res.json({ code: -1, msg: '用户名和密码不能为空' });
   }
@@ -134,9 +168,11 @@ app.post('/api/register', (req, res) => {
     return res.json({ code: -1, msg: '密码长度不能少于6位' });
   }
 
+  // 密码加密
   const salt = bcrypt.genSaltSync(10);
   const hashPassword = bcrypt.hashSync(password, salt);
 
+  // 插入数据库
   const sql = 'INSERT INTO users (username, password, email, is_admin) VALUES (?, ?, ?, 0)';
   connection.query(sql, [username, hashPassword, email || ''], (err, results) => {
     if (err) {
@@ -149,16 +185,16 @@ app.post('/api/register', (req, res) => {
   });
 });
 
-// ======================
-// 接口：用户登录（核心：正确保存 session）
-// ======================
+// 登录
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body;
 
+  // 参数校验
   if (!username || !password) {
     return res.json({ code: -1, msg: '用户名和密码不能为空' });
   }
 
+  // 查询用户
   const sql = 'SELECT id, username, password, is_admin FROM users WHERE username = ?';
   connection.query(sql, [username], (err, results) => {
     if (err) {
@@ -168,13 +204,14 @@ app.post('/api/login', (req, res) => {
       return res.json({ code: -1, msg: '用户名或密码错误' });
     }
 
+    // 验证密码
     const user = results[0];
     const isPasswordValid = bcrypt.compareSync(password, user.password);
     if (!isPasswordValid) {
       return res.json({ code: -1, msg: '用户名或密码错误' });
     }
 
-    // 关键：保存用户信息到 session（确保 req.session 存在）
+    // 保存用户信息到 Session
     req.session.user = {
       id: user.id,
       username: user.username,
@@ -185,9 +222,7 @@ app.post('/api/login', (req, res) => {
   });
 });
 
-// ======================
-// 接口：获取用户信息
-// ======================
+// 获取当前用户信息
 app.get('/api/user/info', (req, res) => {
   if (!req.session || !req.session.user) {
     return res.json({ code: -1, msg: '未登录' });
@@ -198,60 +233,50 @@ app.get('/api/user/info', (req, res) => {
   });
 });
 
-// ======================
-// 接口：退出登录
-// ======================
+// 退出登录
 app.post('/api/logout', (req, res) => {
   if (!req.session) {
     return res.json({ code: 0, msg: '退出成功' });
   }
   req.session.destroy((err) => {
     if (err) {
-      return res.json({ code: -1, msg: '退出失败' });
+      return res.json({ code: -1, msg: '退出失败：' + err.message });
     }
     res.json({ code: 0, msg: '退出成功' });
   });
 });
 
-// ======================
-// 接口：新增数据（支持图片上传）
-// ======================
+// ----------------------
+// 数据项模块接口
+// ----------------------
+// 新增数据（带图片上传）
 app.post('/api/data/add', upload.single('image'), (req, res) => {
-  // 1. 检查 session 和登录状态
-  if (!req.session) {
-    return res.json({ code: -1, msg: 'Session 异常，请重启服务' });
-  }
-  if (!req.session.user) {
+  // 登录校验
+  if (!req.session || !req.session.user) {
     return res.json({ code: -1, msg: '请先登录' });
   }
 
-  // 2. 获取参数
+  // 参数获取&校验
   const title = req.body.title?.trim() || '';
   const content = req.body.content?.trim() || '';
   const imageUrl = req.file ? `/uploads/${req.file.filename}` : '';
 
-  // 3. 验证参数
   if (!title || !content) {
     return res.json({ code: -1, msg: '标题和内容不能为空' });
   }
 
-  // 4. 插入数据库
-  const sql = 'INSERT INTO data_items (title, content, user_id, image_url) VALUES (?, ?, ?, ?)';
+  // 插入数据库
+  const sql = 'INSERT INTO data_items (title, content, user_id, image_url, createdAt) VALUES (?, ?, ?, ?, NOW())';
   connection.query(sql, [title, content, req.session.user.id, imageUrl], (err, results) => {
     if (err) {
       console.error('新增数据失败：', err);
       return res.json({ code: -1, msg: '新增数据失败：' + err.message });
     }
-    if (results.affectedRows === 0) {
-      return res.json({ code: -1, msg: '数据插入失败，无行受影响' });
-    }
     res.json({ code: 0, msg: '新增成功', data: { id: results.insertId, image_url: imageUrl } });
   });
 });
 
-// ======================
-// 接口：获取个人数据
-// ======================
+// 获取个人数据列表
 app.get('/api/data/list', (req, res) => {
   if (!req.session || !req.session.user) {
     return res.json({ code: -1, msg: '请先登录' });
@@ -271,23 +296,19 @@ app.get('/api/data/list', (req, res) => {
   });
 });
 
-// ======================
-// 接口：删除个人数据（含图片）
-// ======================
-// 必须要有这行，位置在 session 之前
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-
+// 删除个人数据（含图片文件）
 app.delete('/api/data/delete/:id', (req, res) => {
   if (!req.session || !req.session.user) {
     return res.json({ code: -1, msg: '请先登录' });
   }
 
   const { id } = req.params;
+  // 先查询数据，验证权限
   const checkSql = `SELECT id, image_url, user_id FROM data_items WHERE id = ?`;
   
   connection.query(checkSql, [id], (err, results) => {
     if (err || results.length === 0) {
-      return res.json({ code: -1, msg: '无权限删除该数据' });
+      return res.json({ code: -1, msg: '数据不存在或无权限删除' });
     }
 
     const data = results[0];
@@ -302,9 +323,9 @@ app.delete('/api/data/delete/:id', (req, res) => {
         return res.json({ code: -1, msg: '删除失败：' + err.message });
       }
 
-      // 删除图片文件
+      // 删除图片文件（如果有）
       if (data.image_url) {
-        const imagePath = path.join(__dirname, data.image_url.replace('/uploads/', 'uploads/'));
+        const imagePath = path.join(ROOT_DIR, data.image_url);
         if (fs.existsSync(imagePath)) {
           fs.unlinkSync(imagePath);
         }
@@ -315,9 +336,10 @@ app.delete('/api/data/delete/:id', (req, res) => {
   });
 });
 
-// ======================
-// 管理员接口：获取所有用户
-// ======================
+// ----------------------
+// 管理员模块接口
+// ----------------------
+// 获取所有用户
 app.get('/api/admin/users', checkAdmin, (req, res) => {
   const sql = 'SELECT id, username, email, is_admin FROM users ORDER BY id DESC';
   connection.query(sql, (err, results) => {
@@ -328,12 +350,15 @@ app.get('/api/admin/users', checkAdmin, (req, res) => {
   });
 });
 
-// ======================
-// 管理员接口：修改用户权限
-// ======================
+// 修改用户管理员权限
 app.post('/api/admin/set-admin/:userId', checkAdmin, (req, res) => {
   const { userId } = req.params;
   const { is_admin } = req.body;
+
+  // 参数校验
+  if (is_admin !== 0 && is_admin !== 1) {
+    return res.json({ code: -1, msg: '权限值必须是 0（普通用户）或 1（管理员）' });
+  }
 
   const sql = 'UPDATE users SET is_admin = ? WHERE id = ?';
   connection.query(sql, [is_admin, userId], (err) => {
@@ -344,9 +369,7 @@ app.post('/api/admin/set-admin/:userId', checkAdmin, (req, res) => {
   });
 });
 
-// ======================
-// 管理员接口：获取所有数据（含图片）
-// ======================
+// 获取所有数据（关联用户信息）
 app.get('/api/admin/all-data', checkAdmin, (req, res) => {
   const sql = `
     SELECT d.id, d.title, d.content, d.image_url, d.createdAt, u.username 
@@ -362,9 +385,7 @@ app.get('/api/admin/all-data', checkAdmin, (req, res) => {
   });
 });
 
-// ======================
-// 管理员接口：导出Excel（CSV）
-// ======================
+// 导出所有数据为 CSV（Excel 兼容）
 app.get('/api/admin/export-excel', checkAdmin, (req, res) => {
   const sql = `
     SELECT d.title, d.content, d.image_url, d.createdAt, u.username 
@@ -383,35 +404,24 @@ app.get('/api/admin/export-excel', checkAdmin, (req, res) => {
     }
 
     try {
+      // 文件名（编码解决中文乱码）
       const fileName = encodeURIComponent(`所有数据_${new Date().toLocaleDateString()}.csv`);
+      // 响应头配置
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
 
-      // CSV 转义辅助函数
-      const escapeCsv = (str) => {
-        if (typeof str !== 'string') str = String(str);
-        str = str.replace(/"/g, '""');
-        if (str.includes(',') || str.includes('\n') || str.includes('"')) {
-          str = `"${str}"`;
-        }
-        return str;
-      };
-
-      // 表头
+      // 构建 CSV 内容
       const header = `${escapeCsv('标题')},${escapeCsv('内容')},${escapeCsv('图片路径')},${escapeCsv('创建时间')},${escapeCsv('所属用户')}\n`;
-
-      // 数据行
       const rows = results.map(item => {
         const title = item.title || '';
         const content = item.content || '';
         const imageUrl = item.image_url || '';
         const createdAt = item.createdAt ? new Date(item.createdAt).toLocaleString() : '';
         const username = item.username || '未知用户';
-        
         return `${escapeCsv(title)},${escapeCsv(content)},${escapeCsv(imageUrl)},${escapeCsv(createdAt)},${escapeCsv(username)}`;
       }).join('\n');
 
-      // 加 BOM 解决中文乱码
+      // 加 BOM 解决 Excel 中文乱码
       const bom = '\uFEFF';
       res.send(bom + header + rows);
 
@@ -423,15 +433,47 @@ app.get('/api/admin/export-excel', checkAdmin, (req, res) => {
 });
 
 // ======================
-// 启动服务
+// 8. 数据库连接 & 服务启动
 // ======================
-app.listen(port, () => {
-  console.log(`✅ 后端服务启动成功！访问地址：http://localhost:${port}`);
+// 连接数据库并配置编码
+connection.connect((err) => {
+  if (err) {
+    console.error('❌ 数据库连接失败：', err);
+    // 连接失败时退出进程，Render 会自动重启
+    process.exit(1);
+  }
+  console.log('✅ 数据库连接成功！');
+
+  // 配置数据库编码为 utf8mb4（解决中文乱码）
+  connection.query('SET NAMES utf8mb4', (err) => {
+    if (err) {
+      console.log('⚠️  数据库编码配置失败：', err);
+    } else {
+      console.log('✅ 数据库编码配置为 utf8mb4 成功！');
+    }
+  });
 });
 
-// 优雅退出
+// 启动服务（监听 0.0.0.0，适配 Render 部署）
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ 后端服务启动成功！访问地址：http://0.0.0.0:${PORT}`);
+});
+
+// ======================
+// 9. 优雅退出（关闭数据库连接）
+// ======================
 process.on('SIGINT', () => {
-  connection.end();
-  console.log('\n❌ 数据库连接已关闭，服务停止');
+  connection.end((err) => {
+    if (err) console.error('❌ 数据库连接关闭失败：', err);
+    else console.log('✅ 数据库连接已关闭');
+  });
+  console.log('\n❌ 后端服务已停止');
   process.exit();
 });
+
+// 捕获未处理的异常，避免服务崩溃
+process.on('uncaughtException', (err) => {
+  console.error('❌ 未捕获的异常：', err);
+  connection.end();
+  process.exit(1);
+}); 

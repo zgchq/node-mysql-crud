@@ -1,5 +1,5 @@
 {
-  "name": "mysql-login",
+  "name": "test_db",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
@@ -13,6 +13,7 @@
   "dependencies": {
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",
+    "dotenv": "^17.3.1",
     "exceljs": "^4.4.0",
     "express": "^5.2.1",
     "express-session": "^1.19.0",
@@ -20,5 +21,17 @@
     "mysql": "^2.18.1",
     "mysql2": "^3.17.2",
     "nodemailer": "^8.0.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zgchq/node-mysql-crud.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zgchq/node-mysql-crud/issues"
+  },
+  "homepage": "https://github.com/zgchq/node-mysql-crud#readme",
+  "devDependencies": {
+    "nodemon": "^3.1.13",
+    "xss": "^1.0.15"
   }
 }
