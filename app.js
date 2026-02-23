@@ -58,7 +58,7 @@ if (process.env.DATABASE_URL) {
     database: process.env.DB_NAME || 'test_db',
     port: process.env.DB_PORT || 3306,
     charset: 'utf8mb4',
-    authPlugin: 'mysql_native_password'
+    // authPlugin: 'mysql_native_password'
   };
 }
 
