@@ -1,582 +1,483 @@
-// ======================
-// 1. 核心依赖导入（全量且去重）
-// ======================
-require('dotenv').config();
+ /**
+ * Node.js + MySQL CRUD 项目（Railway 适配版）
+ * 修复：mysql2 异步语法、数据库连接、Session 存储、端口适配、文件上传
+ */
+// 基础依赖引入
 const express = require('express');
-const mysql = require('mysql2'); // 统一使用 mysql2
-const session = require('express-session');
-const bcrypt = require('bcryptjs');
+const cors = require('cors');
+const bcrypt = require('bcrypt');
 const multer = require('multer');
-const path = require('path');
 const fs = require('fs');
-const url = require('url'); // 解析 Railway MySQL URL 必备
-const cors = require('cors'); // 新增：解决跨域问题（Railway 生产环境必需）
+const path = require('path');
+const session = require('express-session');
+const SQLiteStore = require('connect-sqlite3')(session);
+require('dotenv').config();
 
-// ======================
-// 2. 全局配置（适配 Railway）
-// ======================
+// 引入 promise 版本的 mysql2（核心修复点）
+const mysql = require('mysql2/promise');
+
+// ========== 1. 基础配置 ==========
 const app = express();
-// 端口：优先读取 Railway 自动分配的 PORT 环境变量
-const PORT = process.env.PORT || 3000;
-// 项目根目录（Railway 中为 /app）
-const ROOT_DIR = __dirname;
-// 图片上传目录（Railway 卷挂载路径，添加 Railway 环境判断）
-const UPLOAD_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH 
-  ? path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH, 'uploads') // Railway 卷挂载路径
-  : path.join(ROOT_DIR, 'uploads'); // 本地开发路径
+// 适配 Railway 动态端口（核心：不能硬编码 8080）
+const PORT = process.env.PORT || 8080;
+// 运行环境
+const NODE_ENV = process.env.NODE_ENV || 'development';
 
-// ======================
-// 3. 数据库连接配置（核心优化：连接池替代单连接）
-// ======================
-let dbConfig = {};
-
-// 优先使用 Railway 的 MYSQL_URL（跨服务变量引用）
-if (process.env.DATABASE_URL) {
-  try {
-    const dbUrl = new url.URL(process.env.DATABASE_URL);
-    dbConfig = {
-      host: dbUrl.hostname,
-      user: dbUrl.username,
-      password: dbUrl.password,
-      database: dbUrl.pathname.slice(1), // 去掉路径开头的 "/"
-      port: dbUrl.port || 3306,
-      charset: 'utf8mb4',
-      // 移除无效的 authPlugin 配置（避免 Railway 警告）
-      // 连接池优化（适配 Railway 连接限制，生产环境推荐）
-      waitForConnections: true,
-      connectionLimit: 10, // 适度提高连接数
-      queueLimit: 0,
-      enableKeepAlive: true, // 保持连接，减少重连开销
-      keepAliveInitialDelay: 300000
-    };
-    console.log('✅ 已解析 Railway MySQL URL，数据库名：', dbConfig.database);
-  } catch (err) {
-    console.error('❌ 解析 MySQL URL 失败：', err.message);
-    process.exit(1);
-  }
-} else {
-  // 本地开发环境（备用）
-  dbConfig = {
-    host: process.env.DB_HOST || 'localhost',
-    user: process.env.DB_USER || 'root',
-    password: process.env.DB_PASSWORD || '123456',
-    database: process.env.DB_NAME || 'test_db',
-    port: process.env.DB_PORT || 3306,
-    charset: 'utf8mb4',
-    connectionLimit: 5,
-    enableKeepAlive: true
-  };
-}
-
-// 优化：使用连接池替代单连接（生产环境更稳定）
-const dbPool = mysql.createPool(dbConfig);
-
-// ======================
-// 4. 中间件配置（顺序合理，适配 Railway 生产环境）
-// ======================
-// 新增：CORS 配置（解决 Railway 跨域问题）
+// ========== 2. 中间件配置 ==========
+// CORS 配置（允许所有跨域请求，生产可限定域名）
 app.use(cors({
-  origin: process.env.NODE_ENV === 'production' 
-    ? process.env.RAILWAY_PUBLIC_DOMAIN // 生产环境限定域名
-    : '*', // 本地开发允许所有
+  origin: NODE_ENV === 'production' ? process.env.CORS_ORIGIN || '*' : '*',
   credentials: true // 允许携带 Cookie/Session
 }));
-
-// 解析 JSON 请求体（提高限制大小，适配文件上传）
+// 解析 JSON 和表单数据
 app.use(express.json({ limit: '10mb' }));
-// 解析 FormData 表单（支持文件上传）
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-// 托管静态文件（public 目录）
-app.use(express.static('public'));
-// 托管上传的图片（Railway 卷挂载路径）
-app.use('/uploads', express.static(UPLOAD_DIR));
 
-// Session 配置（优化：适配 Railway HTTPS 和 Redis 存储）
+// ========== 3. 数据库连接池配置（核心修复点） ==========
+const dbConfig = {
+  host: process.env.MYSQL_HOST,
+  user: process.env.MYSQL_USER,
+  password: process.env.MYSQL_PASSWORD,
+  database: process.env.MYSQL_DATABASE,
+  port: process.env.MYSQL_PORT || 3306,
+  // 连接池配置（解决连接断开问题）
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+  // 超时配置
+  connectTimeout: 15000,
+  acquireTimeout: 15000,
+  timeout: 15000,
+  // 字符集和时区（解决乱码/时间不一致）
+  charset: 'utf8mb4',
+  timezone: '+08:00'
+};
+
+// 数据库连接池实例
+let dbPool;
+
+/**
+ * 初始化数据库连接
+ * @returns {Promise<mysql.Pool>} 数据库连接池
+ */
+async function initDatabase() {
+  try {
+    // 创建连接池
+    dbPool = mysql.createPool(dbConfig);
+    // 测试连接
+    const [pingResult] = await dbPool.query('SELECT 1 AS ping');
+    console.log('✅ 数据库连接成功！', pingResult);
+    return dbPool;
+  } catch (error) {
+    console.error('❌ 数据库连接失败：', error.message);
+    // 连接失败时退出进程，Railway 会自动重启
+    process.exit(1);
+  }
+}
+
+// ========== 4. Session 配置（修复内存存储警告） ==========
+// Session 存储目录（Railway 需挂载卷，本地自动创建）
+const sessionDir = path.join(__dirname, 'sessions');
+if (!fs.existsSync(sessionDir)) {
+  fs.mkdirSync(sessionDir, { recursive: true });
+}
+
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'railway-secret-123456789',
-  resave: false,
-  saveUninitialized: false,
+  secret: process.env.SESSION_SECRET || 'railway-node-mysql-2026-secure',
+  resave: false, // 禁止无修改时重新保存
+  saveUninitialized: false, // 禁止保存未初始化的 Session
+  store: new SQLiteStore({
+    db: 'sessions.db',
+    dir: sessionDir,
+    table: 'sessions'
+  }),
   cookie: {
-    secure: process.env.RAILWAY_ENVIRONMENT ? true : false, // 优先用 Railway 环境变量
-    httpOnly: true,
-    sameSite: 'none', // 适配跨域 Cookie
-    maxAge: 7 * 24 * 60 * 60 * 1000 // 延长至 7 天
-  },
-  // Railway 推荐：使用内存存储仅用于开发，生产环境建议用 Redis（可选）
-  store: process.env.REDIS_URL ? new (require('connect-redis')(session))({
-    url: process.env.REDIS_URL
-  }) : undefined
+    secure: NODE_ENV === 'production', // 生产环境启用 HTTPS
+    httpOnly: true, // 禁止前端 JS 访问 Cookie
+    maxAge: 24 * 60 * 60 * 1000, // Session 有效期 1 天
+    sameSite: 'lax' // 跨站请求保护
+  }
 }));
 
-// ======================
-// 5. 图片上传配置（Railway 卷挂载持久化 + 错误处理）
-// ======================
-// 确保 uploads 文件夹存在（递归创建，添加错误捕获）
-try {
-  if (!fs.existsSync(UPLOAD_DIR)) {
-    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-    console.log('✅ 创建 uploads 文件夹成功：', UPLOAD_DIR);
-  }
-} catch (err) {
-  console.error('❌ 创建 uploads 文件夹失败：', err.message);
-  // 不退出服务，使用临时目录
-  const TEMP_DIR = path.join(ROOT_DIR, 'temp-uploads');
-  fs.mkdirSync(TEMP_DIR, { recursive: true });
-  UPLOAD_DIR = TEMP_DIR;
-  console.log('⚠️  降级使用临时上传目录：', TEMP_DIR);
+// ========== 5. 文件上传配置（Railway 卷适配） ==========
+// 上传目录（Railway 需挂载 /app/uploads 卷）
+const uploadDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
 }
 
-// multer 存储配置（优化：添加文件大小校验）
+// 上传配置
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, UPLOAD_DIR);
+    cb(null, uploadDir);
   },
   filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase(); // 统一小写扩展名
-    const fileName = `${Date.now()}-${Math.random().toString(36).substr(2, 8)}${ext}`;
-    cb(null, fileName);
+    // 生成唯一文件名，避免重复
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    const ext = path.extname(file.originalname);
+    const filename = `${file.fieldname}-${uniqueSuffix}${ext}`;
+    cb(null, filename);
   }
 });
 
-// 图片格式过滤（优化：支持更多格式，更友好的错误提示）
-const fileFilter = (req, file, cb) => {
-  const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/jpg'];
-  const allowedExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
-  const ext = path.extname(file.originalname).toLowerCase();
-
-  if (allowedTypes.includes(file.mimetype) && allowedExts.includes(ext)) {
-    cb(null, true);
-  } else {
-    cb(new Error(`只允许上传 ${allowedExts.join('、')} 格式的图片！`), false);
-  }
-};
-
-// 初始化 multer（优化：更合理的大小限制，添加错误捕获）
+// 限制文件类型和大小
 const upload = multer({
   storage: storage,
-  fileFilter: fileFilter,
-  limits: { fileSize: 5 * 1024 * 1024 } // 5MB
-}).single('image');
-
-// 封装上传中间件，统一错误处理
-const uploadMiddleware = (req, res, next) => {
-  upload(req, res, (err) => {
-    if (err) {
-      return res.json({ code: -1, msg: err.message });
+  limits: {
+    fileSize: 5 * 1024 * 1024 // 最大 5MB
+  },
+  fileFilter: (req, file, cb) => {
+    // 允许的文件类型
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('仅允许上传 JPG/PNG/GIF/WEBP 格式的图片！'), false);
     }
-    next();
-  });
-};
+  }
+});
 
-// ======================
-// 6. 核心工具函数/中间件（优化）
-// ======================
+// ========== 6. 核心接口 ==========
 /**
- * 管理员权限校验中间件（优化：异步兼容）
+ * 健康检查接口（Railway 健康检查用）
+ * GET /health
  */
-function checkAdmin(req, res, next) {
-  if (!req.session) {
-    return res.json({ code: -1, msg: 'Session 初始化失败' });
-  }
-  if (!req.session.user) {
-    return res.json({ code: -1, msg: '请先登录' });
-  }
-  if (req.session.user.is_admin !== 1) {
-    return res.json({ code: -1, msg: '无管理员权限' });
-  }
-  next();
-}
-
-/**
- * CSV 转义函数（解决导出乱码）
- */
-const escapeCsv = (str) => {
-  if (str === null || str === undefined) return '';
-  if (typeof str !== 'string') str = String(str);
-  str = str.replace(/"/g, '""');
-  if (str.includes(',') || str.includes('\n') || str.includes('"') || str.includes('\r')) {
-    str = `"${str}"`;
-  }
-  return str;
-};
-
-// ======================
-// 7. 健康检查接口（Railway 保活用，优化返回信息）
-// ======================
 app.get('/health', async (req, res) => {
   try {
-    // 新增：数据库健康检查
-    const [pingResult] = await dbPool.query('SELECT 1 as health');
+    // 检查数据库连接
+    const [dbCheck] = await dbPool.query('SELECT NOW() AS current_time');
     res.status(200).json({
       status: 'ok',
-      time: new Date().toISOString(),
+      service: 'node-mysql-crud',
       port: PORT,
-      database: dbConfig.database,
-      database_health: pingResult[0].health === 1,
-      upload_dir: UPLOAD_DIR,
-      railway_env: !!process.env.RAILWAY_ENVIRONMENT
+      env: NODE_ENV,
+      db: 'connected',
+      current_time: dbCheck[0].current_time
     });
-  } catch (err) {
-    res.status(503).json({
+  } catch (error) {
+    res.status(500).json({
       status: 'error',
-      message: '服务不可用',
-      error: err.message
+      service: 'node-mysql-crud',
+      port: PORT,
+      env: NODE_ENV,
+      db: 'disconnected',
+      error: error.message
     });
   }
 });
 
-// ======================
-// 8. 用户模块接口（优化：使用连接池，异步处理）
-// ======================
-// 注册
+/**
+ * 根路径接口
+ */
+app.get('/', (req, res) => {
+  res.send(`
+    <h1>Node.js + MySQL CRUD 服务（Railway 部署）</h1>
+    <p>健康检查：<a href="/health">/health</a></p>
+    <p>接口文档：</p>
+    <ul>
+      <li>POST /api/register - 用户注册</li>
+      <li>POST /api/login - 用户登录</li>
+      <li>POST /api/data/add - 新增数据（支持图片上传）</li>
+      <li>GET /api/data/list - 获取数据列表</li>
+    </ul>
+  `);
+});
+
+/**
+ * 用户注册接口
+ * POST /api/register
+ * 参数：{ username, password, email }
+ */
 app.post('/api/register', async (req, res) => {
   try {
     const { username, password, email } = req.body;
 
+    // 参数校验
     if (!username || !password) {
-      return res.json({ code: -1, msg: '用户名和密码不能为空' });
-    }
-    if (password.length < 6) {
-      return res.json({ code: -1, msg: '密码长度不能少于6位' });
+      return res.json({
+        code: 1,
+        msg: '用户名和密码不能为空'
+      });
     }
 
-    const salt = bcrypt.genSaltSync(10);
-    const hashPassword = bcrypt.hashSync(password, salt);
-
-    const [results] = await dbPool.query(
-      'INSERT INTO users (username, password, email, is_admin) VALUES (?, ?, ?, 0)',
-      [username, hashPassword, email || '']
+    // 检查用户名是否已存在
+    const [existingUser] = await dbPool.query(
+      'SELECT id FROM users WHERE username = ?',
+      [username]
     );
 
-    res.json({ code: 0, msg: '注册成功', data: { userId: results.insertId } });
-  } catch (err) {
-    if (err.code === 'ER_DUP_ENTRY') {
-      return res.json({ code: -1, msg: '用户名已存在' });
+    if (existingUser.length > 0) {
+      return res.json({
+        code: 1,
+        msg: '用户名已存在，请更换'
+      });
     }
-    console.error('注册失败：', err);
-    res.json({ code: -1, msg: '注册失败：' + err.message });
+
+    // 密码加密（bcrypt）
+    const saltRounds = 10;
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+    // 插入用户数据
+    const [result] = await dbPool.query(
+      'INSERT INTO users (username, password, email, is_admin) VALUES (?, ?, ?, ?)',
+      [username, hashedPassword, email || '', 0]
+    );
+
+    res.json({
+      code: 0,
+      msg: '注册成功',
+      data: {
+        userId: result.insertId,
+        username: username
+      }
+    });
+  } catch (error) {
+    console.error('注册接口错误：', error);
+    res.json({
+      code: 500,
+      msg: '服务器内部错误',
+      error: NODE_ENV === 'development' ? error.message : ''
+    });
   }
 });
 
-// 登录
+/**
+ * 用户登录接口
+ * POST /api/login
+ * 参数：{ username, password }
+ */
 app.post('/api/login', async (req, res) => {
   try {
     const { username, password } = req.body;
 
+    // 参数校验
     if (!username || !password) {
-      return res.json({ code: -1, msg: '用户名和密码不能为空' });
+      return res.json({
+        code: 1,
+        msg: '用户名和密码不能为空'
+      });
     }
 
-    const [results] = await dbPool.query(
+    // 查询用户
+    const [userList] = await dbPool.query(
       'SELECT id, username, password, is_admin FROM users WHERE username = ?',
       [username]
     );
 
-    if (results.length === 0) {
-      return res.json({ code: -1, msg: '用户名或密码错误' });
-    }
-
-    const user = results[0];
-    const isPasswordValid = bcrypt.compareSync(password, user.password);
-    if (!isPasswordValid) {
-      return res.json({ code: -1, msg: '用户名或密码错误' });
-    }
-
-    // 保存用户信息到 Session
-    req.session.user = {
-      id: user.id,
-      username: user.username,
-      is_admin: user.is_admin
-    };
-
-    res.json({ code: 0, msg: '登录成功', data: { username: user.username } });
-  } catch (err) {
-    console.error('登录失败：', err);
-    res.json({ code: -1, msg: '登录失败：' + err.message });
-  }
-});
-
-// 获取用户信息
-app.get('/api/user/info', (req, res) => {
-  if (!req.session || !req.session.user) {
-    return res.json({ code: -1, msg: '未登录' });
-  }
-  res.json({
-    code: 0,
-    data: req.session.user
-  });
-});
-
-// 退出登录
-app.post('/api/logout', (req, res) => {
-  if (!req.session) {
-    return res.json({ code: 0, msg: '退出成功' });
-  }
-  req.session.destroy((err) => {
-    if (err) {
-      console.error('退出登录失败：', err);
-      return res.json({ code: -1, msg: '退出失败：' + err.message });
-    }
-    res.json({ code: 0, msg: '退出成功' });
-  });
-});
-
-// ======================
-// 9. 数据项模块接口（带图片上传，优化）
-// ======================
-// 新增数据（使用封装的上传中间件）
-app.post('/api/data/add', uploadMiddleware, async (req, res) => {
-  try {
-    if (!req.session || !req.session.user) {
-      return res.json({ code: -1, msg: '请先登录' });
-    }
-
-    const title = req.body.title?.trim() || '';
-    const content = req.body.content?.trim() || '';
-    const imageUrl = req.file ? `/uploads/${req.file.filename}` : '';
-
-    if (!title || !content) {
-      return res.json({ code: -1, msg: '标题和内容不能为空' });
-    }
-
-    const [results] = await dbPool.query(
-      'INSERT INTO data_items (title, content, user_id, image_url, createdAt) VALUES (?, ?, ?, ?, NOW())',
-      [title, content, req.session.user.id, imageUrl]
-    );
-
-    res.json({ code: 0, msg: '新增成功', data: { id: results.insertId, image_url: imageUrl } });
-  } catch (err) {
-    console.error('新增数据失败：', err);
-    res.json({ code: -1, msg: '新增数据失败：' + err.message });
-  }
-});
-
-// 获取个人数据列表
-app.get('/api/data/list', async (req, res) => {
-  try {
-    if (!req.session || !req.session.user) {
-      return res.json({ code: -1, msg: '请先登录' });
-    }
-
-    const [results] = await dbPool.query(`
-      SELECT id, title, content, image_url, createdAt 
-      FROM data_items 
-      WHERE user_id = ? 
-      ORDER BY createdAt DESC
-    `, [req.session.user.id]);
-
-    res.json({ code: 0, data: results });
-  } catch (err) {
-    console.error('获取数据失败：', err);
-    res.json({ code: -1, msg: '获取数据失败：' + err.message });
-  }
-});
-
-// 删除个人数据（含图片，优化：异步删除）
-app.delete('/api/data/delete/:id', async (req, res) => {
-  try {
-    if (!req.session || !req.session.user) {
-      return res.json({ code: -1, msg: '请先登录' });
-    }
-
-    const { id } = req.params;
-    const [checkResults] = await dbPool.query(
-      `SELECT id, image_url, user_id FROM data_items WHERE id = ?`,
-      [id]
-    );
-
-    if (checkResults.length === 0) {
-      return res.json({ code: -1, msg: '数据不存在' });
-    }
-
-    const data = checkResults[0];
-    if (data.user_id !== req.session.user.id) {
-      return res.json({ code: -1, msg: '无权限删除该数据' });
-    }
-
-    // 删除数据库记录
-    await dbPool.query('DELETE FROM data_items WHERE id = ?', [id]);
-
-    // 删除图片文件（异步，不阻塞响应）
-    if (data.image_url) {
-      const imagePath = path.join(ROOT_DIR, data.image_url);
-      fs.unlink(imagePath, (err) => {
-        if (err) console.error('删除图片失败：', err);
-        else console.log('✅ 删除图片成功：', imagePath);
+    if (userList.length === 0) {
+      return res.json({
+        code: 1,
+        msg: '用户名或密码错误'
       });
     }
 
-    res.json({ code: 0, msg: '删除成功' });
-  } catch (err) {
-    console.error('删除数据失败：', err);
-    res.json({ code: -1, msg: '删除失败：' + err.message });
-  }
-});
+    const user = userList[0];
 
-// ======================
-// 10. 管理员模块接口（优化）
-// ======================
-// 获取所有用户
-app.get('/api/admin/users', checkAdmin, async (req, res) => {
-  try {
-    const [results] = await dbPool.query(
-      'SELECT id, username, email, is_admin FROM users ORDER BY id DESC'
-    );
-    res.json({ code: 0, data: results });
-  } catch (err) {
-    console.error('查询用户失败：', err);
-    res.json({ code: -1, msg: '查询用户失败：' + err.message });
-  }
-});
-
-// 修改用户权限
-app.post('/api/admin/set-admin/:userId', checkAdmin, async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const { is_admin } = req.body;
-
-    if (is_admin !== 0 && is_admin !== 1) {
-      return res.json({ code: -1, msg: '权限值必须是 0（普通用户）或 1（管理员）' });
+    // 验证密码
+    const isPasswordValid = await bcrypt.compare(password, user.password);
+    if (!isPasswordValid) {
+      return res.json({
+        code: 1,
+        msg: '用户名或密码错误'
+      });
     }
 
-    await dbPool.query(
-      'UPDATE users SET is_admin = ? WHERE id = ?',
-      [is_admin, userId]
-    );
+    // 保存 Session
+    req.session.user = {
+      id: user.id,
+      username: user.username,
+      isAdmin: user.is_admin === 1
+    };
 
-    res.json({ code: 0, msg: '权限修改成功' });
-  } catch (err) {
-    console.error('修改权限失败：', err);
-    res.json({ code: -1, msg: '修改权限失败：' + err.message });
-  }
-});
-
-// 获取所有数据
-app.get('/api/admin/all-data', checkAdmin, async (req, res) => {
-  try {
-    const [results] = await dbPool.query(`
-      SELECT d.id, d.title, d.content, d.image_url, d.createdAt, u.username 
-      FROM data_items d
-      LEFT JOIN users u ON d.user_id = u.id
-      ORDER BY d.createdAt DESC
-    `);
-    res.json({ code: 0, data: results });
-  } catch (err) {
-    console.error('查询数据失败：', err);
-    res.json({ code: -1, msg: '查询数据失败：' + err.message });
-  }
-});
-
-// 导出 CSV（优化：更大的响应缓冲区）
-app.get('/api/admin/export-excel', checkAdmin, async (req, res) => {
-  try {
-    const [results] = await dbPool.query(`
-      SELECT d.title, d.content, d.image_url, d.createdAt, u.username 
-      FROM data_items d
-      LEFT JOIN users u ON d.user_id = u.id
-    `);
-
-    if (!results || results.length === 0) {
-      return res.json({ code: -1, msg: '导出失败：暂无数据可导出' });
-    }
-
-    const fileName = encodeURIComponent(`所有数据_${new Date().toLocaleDateString().replace(/\//g, '-')}.csv`);
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-    res.setHeader('Transfer-Encoding', 'chunked');
-
-    // 加 BOM 解决 Excel 中文乱码
-    const bom = '\uFEFF';
-    const header = `${escapeCsv('标题')},${escapeCsv('内容')},${escapeCsv('图片路径')},${escapeCsv('创建时间')},${escapeCsv('所属用户')}\n`;
-    
-    // 分批发送数据，避免内存溢出
-    res.write(bom + header);
-    results.forEach((item, index) => {
-      const title = item.title || '';
-      const content = item.content || '';
-      const imageUrl = item.image_url || '';
-      const createdAt = item.createdAt ? new Date(item.createdAt).toLocaleString() : '';
-      const username = item.username || '未知用户';
-      const row = `${escapeCsv(title)},${escapeCsv(content)},${escapeCsv(imageUrl)},${escapeCsv(createdAt)},${escapeCsv(username)}\n`;
-      res.write(row);
-      // 每 100 行刷新一次缓冲区
-      if (index % 100 === 0) res.flush();
+    res.json({
+      code: 0,
+      msg: '登录成功',
+      data: {
+        userId: user.id,
+        username: user.username,
+        isAdmin: user.is_admin === 1
+      }
     });
-
-    res.end();
   } catch (error) {
-    console.error('导出CSV失败：', error);
-    res.json({ code: -1, msg: '导出失败：' + error.message });
+    console.error('登录接口错误：', error);
+    res.json({
+      code: 500,
+      msg: '服务器内部错误',
+      error: NODE_ENV === 'development' ? error.message : ''
+    });
   }
 });
 
-// ======================
-// 11. 服务启动（核心适配 Railway，优化）
-// ======================
-// 测试数据库连接（使用连接池）
-async function testDBConnection() {
-  try {
-    await dbPool.query('SELECT 1');
-    console.log('✅ 数据库连接成功！');
-    
-    // 配置 utf8mb4 编码
-    await dbPool.query('SET NAMES utf8mb4');
-    console.log('✅ 数据库编码配置为 utf8mb4 成功！');
-  } catch (err) {
-    console.error('❌ 数据库连接失败：', err);
-    // Railway 中延迟退出，给重试机会
-    setTimeout(() => process.exit(1), 5000);
-  }
-}
-
-// 启动服务（优化：显示真实的 Railway 公网地址）
-async function startServer() {
-  await testDBConnection();
-  
-  app.listen(PORT, '0.0.0.0', () => {
-    // 显示 Railway 真实公网地址（而非 localhost）
-    const publicUrl = process.env.RAILWAY_PUBLIC_DOMAIN 
-      ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` 
-      : `http://localhost:${PORT}`;
-    console.log(`✅ 服务启动成功！端口：${PORT}，访问地址：${publicUrl}`);
-    console.log(`✅ 上传目录：${UPLOAD_DIR}`);
-    console.log(`✅ 运行环境：${process.env.RAILWAY_ENVIRONMENT || '本地开发'}`);
+/**
+ * 用户登出接口
+ * GET /api/logout
+ */
+app.get('/api/logout', (req, res) => {
+  req.session.destroy((err) => {
+    if (err) {
+      return res.json({
+        code: 1,
+        msg: '登出失败'
+      });
+    }
+    res.json({
+      code: 0,
+      msg: '登出成功'
+    });
   });
+});
+
+/**
+ * 新增数据接口（支持图片上传）
+ * POST /api/data/add
+ * 参数：{ title, content } + file (image)
+ */
+app.post('/api/data/add', upload.single('image'), async (req, res) => {
+  try {
+    // 检查登录状态
+    if (!req.session.user) {
+      return res.json({
+        code: 1,
+        msg: '请先登录'
+      });
+    }
+
+    const { title, content } = req.body;
+    const userId = req.session.user.id;
+
+    // 参数校验
+    if (!title || !content) {
+      return res.json({
+        code: 1,
+        msg: '标题和内容不能为空'
+      });
+    }
+
+    // 图片路径（无图片则为空）
+    const imageUrl = req.file ? `/uploads/${req.file.filename}` : '';
+
+    // 插入数据
+    const [result] = await dbPool.query(
+      'INSERT INTO data_items (title, content, user_id, image_url) VALUES (?, ?, ?, ?)',
+      [title, content, userId, imageUrl]
+    );
+
+    res.json({
+      code: 0,
+      msg: '数据新增成功',
+      data: {
+        id: result.insertId,
+        title: title,
+        content: content,
+        imageUrl: imageUrl,
+        userId: userId
+      }
+    });
+  } catch (error) {
+    console.error('新增数据接口错误：', error);
+    res.json({
+      code: 500,
+      msg: '服务器内部错误',
+      error: NODE_ENV === 'development' ? error.message : ''
+    });
+  }
+});
+
+/**
+ * 获取数据列表接口
+ * GET /api/data/list
+ * 参数：?page=1&size=10
+ */
+app.get('/api/data/list', async (req, res) => {
+  try {
+    // 分页参数
+    const page = parseInt(req.query.page) || 1;
+    const size = parseInt(req.query.size) || 10;
+    const offset = (page - 1) * size;
+
+    // 查询总数
+    const [countResult] = await dbPool.query('SELECT COUNT(*) AS total FROM data_items');
+    const total = countResult[0].total;
+
+    // 查询列表
+    const [list] = await dbPool.query(`
+      SELECT di.id, di.title, di.content, di.image_url, di.createdAt, u.username 
+      FROM data_items di
+      LEFT JOIN users u ON di.user_id = u.id
+      ORDER BY di.createdAt DESC
+      LIMIT ? OFFSET ?
+    `, [size, offset]);
+
+    res.json({
+      code: 0,
+      msg: '获取列表成功',
+      data: {
+        list: list.map(item => ({
+          id: item.id,
+          title: item.title,
+          content: item.content,
+          imageUrl: item.image_url,
+          createdAt: item.createdAt,
+          username: item.username
+        })),
+        pagination: {
+          page: page,
+          size: size,
+          total: total,
+          pages: Math.ceil(total / size)
+        }
+      }
+    });
+  } catch (error) {
+    console.error('获取数据列表接口错误：', error);
+    res.json({
+      code: 500,
+      msg: '服务器内部错误',
+      error: NODE_ENV === 'development' ? error.message : ''
+    });
+  }
+});
+
+// ========== 7. 静态文件托管 ==========
+// 托管上传的图片
+app.use('/uploads', express.static(uploadDir));
+
+// ========== 8. 全局错误处理 ==========
+app.use((err, req, res, next) => {
+  console.error('全局错误：', err);
+  res.status(500).json({
+    code: 500,
+    msg: '服务器内部错误',
+    error: NODE_ENV === 'development' ? err.message : ''
+  });
+});
+
+// ========== 9. 启动服务 ==========
+async function startServer() {
+  try {
+    // 先初始化数据库连接
+    await initDatabase();
+
+    // 启动 HTTP 服务
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`✅ 服务启动成功！端口：${PORT}`);
+      console.log(`✅ 运行环境：${NODE_ENV}`);
+      console.log(`✅ 上传目录：${uploadDir}`);
+      console.log(`✅ Session 目录：${sessionDir}`);
+      console.log(`✅ 访问地址：http://0.0.0.0:${PORT}`);
+    });
+  } catch (error) {
+    console.error('❌ 服务启动失败：', error.message);
+    process.exit(1);
+  }
 }
 
 // 启动服务
 startServer();
 
-// ======================
-// 12. 优雅退出 & 异常捕获（Railway 适配，优化）
-// ======================
-// 捕获 SIGTERM（Railway 停止服务的信号）
-process.on('SIGTERM', async () => {
-  console.log('\n⚠️  收到停止信号，开始优雅退出');
-  try {
-    await dbPool.end();
-    console.log('✅ 数据库连接池已关闭');
-  } catch (err) {
-    console.error('❌ 数据库连接池关闭失败：', err);
-  }
-  console.log('❌ 服务已停止');
-  process.exit(0);
-});
-
-// 兼容 SIGINT（本地 Ctrl+C）
-process.on('SIGINT', async () => {
-  await dbPool.end().catch(err => console.error('❌ 数据库关闭失败：', err));
-  console.log('\n❌ 服务已停止');
-  process.exit();
-});
-
-// 捕获未处理异常（优化：不直接退出，记录后重启）
-process.on('uncaughtException', (err) => {
-  console.error('❌ 未捕获异常：', err);
-  // Railway 会自动重启服务，无需手动退出
-});
-
-// 捕获未处理的 Promise 拒绝
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('❌ 未处理的 Promise 拒绝：', reason, promise);
-});
+// 暴露数据库连接池（供其他模块使用）
+module.exports = {
+  app,
+  dbPool,
+  initDatabase
+};

@@ -1,41 +1,30 @@
 {
-  "name": "test_db",
+  "name": "node-mysql-crud",
   "version": "1.0.0",
-  "description": "",
+  "description": "Node.js + MySQL CRUD 项目（适配 Railway 部署）",
   "main": "app.js",
   "scripts": {
     "start": "node app.js",
     "dev": "nodemon app.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
   "engines": {
     "node": "24.13.1"
   },
   "dependencies": {
-    "bcryptjs": "^3.0.3",
-    "cors": "^2.8.6",
+    "bcrypt": "^5.1.1",
+    "connect-sqlite3": "^0.9.15",
+    "cors": "^2.8.5",
     "dotenv": "^17.3.1",
-    "exceljs": "^4.4.0",
-    "express": "^5.2.1",
-    "express-session": "^1.19.0",
-    "multer": "^2.0.2",
-    "mysql2": "^3.17.2",
-    "nodemailer": "^8.0.1"
+    "express": "^4.18.2",
+    "express-session": "^1.18.0",
+    "multer": "^1.4.5-lts.1",
+    "mysql2": "^3.9.1"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/zgchq/node-mysql-crud.git"
-  },
-  "bugs": {
-    "url": "https://github.com/zgchq/node-mysql-crud/issues"
-  },
-  "homepage": "https://github.com/zgchq/node-mysql-crud#readme",
   "devDependencies": {
-    "nodemon": "^3.1.13",
-    "xss": "^1.0.15"
-  }
+    "nodemon": "^3.0.3"
+  },
+  "keywords": ["nodejs", "mysql", "railway", "crud"],
+  "author": "",
+  "license": "MIT"
 }
