@@ -1,0 +1,37 @@
+ # Dockerfile.mysql
+# 基于官方 MySQL 5.7 镜像（稳定版，适配多数项目）
+FROM mysql:5.7
+
+# ======================
+# 1. 基础环境变量（Railway 可通过平台变量覆盖）
+# ======================
+# 根密码（Railway 部署时必须用平台变量覆盖，避免硬编码）
+ENV MYSQL_ROOT_PASSWORD=default_root_pwd
+# 默认数据库（和 Node.js 项目的 MYSQL_DATABASE 保持一致）
+ENV MYSQL_DATABASE=node_crud
+# 应用专用用户（避免直接用 root）
+ENV MYSQL_USER=node_user
+ENV MYSQL_PASSWORD=node_pwd
+
+# ======================
+# 2. 安装依赖（可选，解决时区问题）
+# ======================
+RUN apt-get update && apt-get install -y tzdata \
+    && ln -snf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && echo "Asia/Shanghai" > /etc/timezone \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# ======================
+# 3. 复制初始化脚本（关键：适配 Railway 路径）
+# ======================
+# 确保初始化脚本目录存在（避免复制失败）
+RUN mkdir -p /docker-entrypoint-initdb.d/
+# 复制所有 .sql/.sh 脚本（支持多个初始化文件）
+COPY ./init-scripts/*.sql /docker-entrypoint-initdb.d/
+COPY ./init-scripts/*.sh /docker-entrypoint-initdb.d/
+# 赋予执行权限（避免脚本无法运行）
+RUN chmod +x /docker-entrypoint-initdb.d/*
+
+# ======================
+# 4. 核心配置（适配 MySQL 5.7，避免冗余）
+# ======================
