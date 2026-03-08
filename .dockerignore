@@ -1,0 +1,21 @@
+# 依赖目录
+node_modules/
+npm-debug.log
+
+# 环境变量文件
+.env
+.env.local
+.env.development
+.env.production
+
+# 版本控制
+.git
+.gitignore
+
+# 日志和缓存
+*.log
+.cache/
+
+# 前端构建目录（如果本地构建过）
+frontend/dist/
+frontend/build/
